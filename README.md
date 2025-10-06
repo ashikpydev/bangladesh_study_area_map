@@ -1,4 +1,4 @@
-# 🇧🇩 Bangladesh Study Area Map Generator (Shiny App)
+# Bangladesh Study Area Map Generator (Shiny App)
 
 **Author:** Ashiqur Rahman Rony  
 **Optimized by:** GPT-5 
