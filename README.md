@@ -79,7 +79,9 @@ install.packages(c(
 ---
 
 ## 📸 Screenshot
+### Screenshot 1:
 ![Bangladesh Study Area Map Generator Screenshot](screenshot/screenshot.PNG)
+### Screenshot 2:
 ![Bangladesh Study Area Map Generator Screenshot](screenshot/study_area_map_2025-10-06.png)
 
 ---
