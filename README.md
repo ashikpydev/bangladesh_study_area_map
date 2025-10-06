@@ -78,9 +78,8 @@ install.packages(c(
 
 ---
 
-## 📸 Screenshot (Optional)
-
-*(Add a screenshot of your app here once running)*  
+## 📸 Screenshot
+![Bangladesh Study Area Map Generator Screenshot](screenshot/screenshot.PNG)
 ![Bangladesh Study Area Map Generator Screenshot](screenshot/study_area_map_2025-10-06.png)
 
 ---
