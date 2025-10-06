@@ -1,0 +1,240 @@
+# app.R
+# Bangladesh Study Area Map Generator (refined with conditional legend, no elevation, district zoom for unions)
+# Author: Ashiqur Rahman Rony (Enhanced by Grok)
+# Run using: shiny::runApp()
+
+# --- Packages ----------------------------------------------------------------
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  shiny, leaflet, geodata, sf, tidyverse, classInt,
+  cowplot, viridis, ggnewscale, ggspatial, ggrepel, RColorBrewer
+)
+
+# --- Data path & download ----------------------------------------------------
+# Current folder where app.R is running
+app_dir <- getwd()  
+
+# gadm folder inside app folder
+data_path <- file.path(app_dir, "gadm")
+
+# Create gadm folder if it doesn't exist
+if (!dir.exists(data_path)) dir.create(data_path)
+
+# Download GADM data if not exists
+if (!all(file.exists(file.path(data_path, paste0("gadm41_BGD_", 0:4, "_pk.rds"))))) {
+  gadm("BGD", level = 0, path = data_path, resolution = 1)
+  gadm("BGD", level = 1, path = data_path, resolution = 1)
+  gadm("BGD", level = 2, path = data_path, resolution = 1)
+  gadm("BGD", level = 3, path = data_path, resolution = 1)
+  gadm("BGD", level = 4, path = data_path, resolution = 1)
+}
+
+# Load GADM RDS files
+country_sf   <- readRDS(file.path(data_path, "gadm41_BGD_0_pk.rds")) |> st_as_sf()
+divisions_sf <- readRDS(file.path(data_path, "gadm41_BGD_1_pk.rds")) |> st_as_sf()
+districts_sf <- readRDS(file.path(data_path, "gadm41_BGD_2_pk.rds")) |> st_as_sf()
+upazilas_sf  <- readRDS(file.path(data_path, "gadm41_BGD_3_pk.rds")) |> st_as_sf()
+unions_sf    <- readRDS(file.path(data_path, "gadm41_BGD_4_pk.rds")) |> st_as_sf()
+
+# Projection
+crs_lambert <- "+proj=laea +lat_0=24 +lon_0=90 +datum=WGS84 +units=m +no_defs"
+
+# UI choices
+division_choices <- sort(unique(unions_sf$NAME_1))
+district_choices_all <- sort(unique(unions_sf$NAME_2))
+upazila_choices_all <- sort(unique(unions_sf$NAME_3))
+union_choices_all <- sort(unique(unions_sf$NAME_4))
+
+# --- UI ----------------------------------------------------------------------
+ui <- fluidPage(
+  titlePanel("Bangladesh Study Area Map Generator"),
+  sidebarLayout(
+    sidebarPanel(
+      helpText("Select administrative areas to generate interactive and static publication maps."),
+      selectizeInput("divisions", "Select Divisions", choices = division_choices, multiple = TRUE),
+      selectizeInput("districts", "Select Districts", choices = NULL, multiple = TRUE),
+      selectizeInput("upazilas", "Select Upazilas", choices = NULL, multiple = TRUE),
+      selectizeInput("unions", "Select Unions", choices = NULL, multiple = TRUE),
+      hr(),
+      downloadButton("downloadMap", "Download High-Quality PNG")
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Interactive Map", leafletOutput("interactiveMap", height = "650px")),
+        tabPanel("Static Research Map", plotOutput("staticMap", height = "820px"))
+      )
+    )
+  )
+)
+
+# --- Server ------------------------------------------------------------------
+server <- function(input, output, session) {
+  
+  # Dynamic dropdown updates
+  observe({
+    if (length(input$divisions) > 0) {
+      districts_choices <- sort(unique(unions_sf$NAME_2[unions_sf$NAME_1 %in% input$divisions]))
+    } else districts_choices <- district_choices_all
+    updateSelectizeInput(session, "districts", choices = districts_choices)
+  })
+  
+  observe({
+    if (length(input$districts) > 0) {
+      upazilas_choices <- sort(unique(unions_sf$NAME_3[unions_sf$NAME_2 %in% input$districts]))
+    } else upazilas_choices <- upazila_choices_all
+    updateSelectizeInput(session, "upazilas", choices = upazilas_choices, server = TRUE)
+  })
+  
+  observe({
+    if (length(input$upazilas) > 0) {
+      unions_choices <- sort(unique(unions_sf$NAME_4[unions_sf$NAME_3 %in% input$upazilas]))
+    } else unions_choices <- union_choices_all
+    updateSelectizeInput(session, "unions", choices = unions_choices, server = TRUE)
+  })
+  
+  # Selected spatial subset (Lambert CRS)
+  selected_areas <- reactive({
+    sel <- unions_sf
+    if (length(input$divisions) > 0) sel <- subset(sel, NAME_1 %in% input$divisions)
+    if (length(input$districts) > 0) sel <- subset(sel, NAME_2 %in% input$districts)
+    if (length(input$upazilas) > 0) sel <- subset(sel, NAME_3 %in% input$upazilas)
+    if (length(input$unions) > 0) sel <- subset(sel, NAME_4 %in% input$unions)
+    if (nrow(sel) == 0) return(NULL)
+    st_transform(sel, crs_lambert)
+  })
+  
+  # --- Interactive map -------------------------------------------------------
+  output$interactiveMap <- renderLeaflet({
+    sel <- selected_areas()
+    country_wgs84 <- st_transform(country_sf, "EPSG:4326")
+    if (is.null(sel)) {
+      leaflet() %>%
+        addProviderTiles("CartoDB.Positron") %>%
+        addPolygons(data = country_wgs84, fillColor = "gray90", color = "gray60", weight = 0.5) %>%
+        addControl("Select areas on left panel", position = "topright")
+    } else {
+      sel_wgs84 <- st_transform(sel, "EPSG:4326")
+      
+      # Determine coloring level for interactive map to match static
+      color_by <- if (length(input$unions) > 0) "NAME_4" else if (length(input$upazilas) > 0) "NAME_3" else if (length(input$districts) > 0) "NAME_2" else if (length(input$divisions) > 0) "NAME_1" else "NAME_4"
+      unique_values <- unique(sel_wgs84[[color_by]])
+      pal <- colorFactor(viridis::viridis(length(unique_values)), domain = unique_values)
+      
+      # Zoom logic
+      if (length(input$unions) > 0) {
+        selected_districts <- subset(districts_sf, NAME_2 %in% unique(sel$NAME_2)) |> st_transform("EPSG:4326")
+        bbox <- st_bbox(selected_districts)
+      } else {
+        bbox <- st_bbox(sel_wgs84)
+      }
+      
+      leaflet() %>%
+        addProviderTiles("CartoDB.Positron") %>%
+        addPolygons(
+          data = sel_wgs84, fillColor = ~pal(sel_wgs84[[color_by]]), color = "black", weight = 0.6, fillOpacity = 0.6,
+          popup = ~paste0("<b>", get(color_by), "</b><br/>", NAME_3, ", ", NAME_2, ", ", NAME_1)
+        ) %>%
+        addPolygons(data = country_wgs84, fill = FALSE, color = "gray70", weight = 0.5) %>%
+        addLegend("bottomright", pal = pal, values = unique_values, title = gsub("NAME_", "", color_by), opacity = 0.8) %>%
+        fitBounds(bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"])
+    }
+  })
+  
+  # --- Static Map ------------------------------------------------------------
+  output$staticMap <- renderPlot({
+    sel <- selected_areas()
+    if (is.null(sel)) {
+      plot.new()
+      text(0.5, 0.5, "Select areas on the left to generate the map", cex = 1.3)
+      return()
+    }
+    
+    # Locator inset - highlight selected districts
+    sel_districts_locator <- subset(districts_sf, NAME_2 %in% unique(sel$NAME_2)) |> st_transform("EPSG:4326")
+    locator_map <- ggplot() +
+      geom_sf(data = country_sf, fill = "gray95", color = "gray80", size = 0.15) +
+      geom_sf(data = sel_districts_locator, fill = "#0072B2", color = "#005A9C", size = 0.2) +
+      theme_void()
+    
+    # Determine coloring level
+    color_by <- if (length(input$unions) > 0) "NAME_4" else if (length(input$upazilas) > 0) "NAME_3" else if (length(input$districts) > 0) "NAME_2" else if (length(input$divisions) > 0) "NAME_1" else NULL
+    
+    # Group sel by color_by
+    if (!is.null(color_by)) {
+      sel_grouped <- sel |> 
+        group_by(!!sym(color_by)) |> 
+        summarise(geometry = st_union(geometry), .groups = "drop") |> 
+        st_as_sf()
+    } else {
+      sel_grouped <- st_union(sel) |> st_as_sf() |> mutate(dummy = "Selected Area")
+      color_by <- "dummy"
+    }
+    
+    # Unique levels for coloring
+    unique_levels <- sort(unique(sel_grouped[[color_by]]))
+    n_levels <- length(unique_levels)
+    
+    # Palette for selected areas - sequential for attractiveness
+    if (n_levels > 1) {
+      pal_cols <- hcl.colors(n_levels, "YlOrRd", rev = TRUE)
+      names(pal_cols) <- unique_levels
+    } else {
+      pal_cols <- "#D55E00"
+    }
+    
+    # Selected districts for context
+    sel_districts <- subset(districts_sf, NAME_2 %in% unique(sel$NAME_2)) |> st_transform(crs_lambert)
+    
+    # Centroids and labels
+    centroids_sf <- suppressWarnings(st_centroid(sel_grouped))
+    coords <- st_coordinates(centroids_sf)
+    labels_df <- data.frame(coords, label = sel_grouped[[color_by]])
+    
+    # Main map - district-level focus
+    main_map <- ggplot() +
+      geom_sf(data = country_sf |> st_transform(crs_lambert), fill = "lightgray", alpha = 0.3, color = "gray", size = 0.3) +
+      geom_sf(data = sel_grouped, aes(fill = !!sym(color_by)), color = "black", size = 0.25, alpha = 0.7) +
+      scale_fill_manual(name = if(color_by == "NAME_4") "Union" else color_by, values = pal_cols) +
+      geom_sf(data = sel_districts, fill = NA, color = "gray60", size = 0.2) +
+      geom_text_repel(
+        data = labels_df, aes(X, Y, label = label),
+        size = 3.2, fontface = "bold", segment.color = "gray50", box.padding = 0.4, max.overlaps = 50
+      ) +
+      annotation_scale(location = "bl", width_hint = 0.22) +
+      annotation_north_arrow(location = "tl", style = north_arrow_minimal(text_size = 8)) +
+      coord_sf(crs = crs_lambert, expand = TRUE) +
+      labs(
+        title = "Study Area Map",
+        subtitle = paste0("Selected: ", paste0(unique_levels, collapse = ", ")),
+        caption = "Data: GADM (boundaries)"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 9, hjust = 0.5),
+        plot.caption = element_text(size = 8, color = "gray50", hjust = 1),
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.position = if (n_levels > 1) "right" else "none"
+      )
+    
+    # Draw main map with locator inset
+    cowplot::ggdraw() +
+      cowplot::draw_plot(main_map) +
+      cowplot::draw_plot(locator_map, x = 0.78, y = 0.78, width = 0.22, height = 0.22)
+  })
+  
+  # --- Download (PNG) --------------------------------------------------------
+  output$downloadMap <- downloadHandler(
+    filename = function() paste0("study_area_map_", Sys.Date(), ".png"),
+    content = function(file) {
+      ggsave(file, plot = last_plot(), device = "png", width = 12, height = 8, dpi = 300)
+    }
+  )
+}
+
+# --- Run ---------------------------------------------------------------------
+shinyApp(ui, server)
